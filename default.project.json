@@ -1,0 +1,41 @@
+{
+  "name": "PLAY3Analytics",
+  "tree": {
+    "$className": "DataModel",
+
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "PLAY3_ANALYTICS": {
+        "$className": "Folder",
+        "Config": {
+          "$path": "sdk/Config.lua"
+        },
+        "Analytics": {
+          "$className": "Folder",
+          "HashLib": {
+            "$path": "sdk/Analytics/HashLib"
+          },
+          "PLAY3_Analytics": {
+            "$path": "sdk/Analytics/PLAY3_Analytics.lua"
+          },
+          "Profileanalyzer": {
+            "$path": "sdk/Analytics/Profileanalyzer.lua"
+          },
+          "PurchaseTracker": {
+            "$path": "sdk/Analytics/PurchaseTracker.lua"
+          }
+        }
+      }
+    },
+
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "PLAY3_ANALYTICS_SERVER": {
+        "$className": "Folder",
+        "Main": {
+          "$path": "sdk/Main.server.lua"
+        }
+      }
+    }
+  }
+}
