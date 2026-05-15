@@ -62,7 +62,7 @@ API:
 
 --]=]---------------------------------------------------------------------------
 
-local Base64 = require(script.Parent.Base64)
+local Base64 = require(script.Base64)
 
 --------------------------------------------------------------------------------
 -- LOCALIZATION FOR VM OPTIMIZATIONS

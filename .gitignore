@@ -1,0 +1,19 @@
+# Rojo build artifacts
+*.rbxl
+*.rbxlx
+*.rbxm
+*.rbxmx
+
+# Local install/dev helpers (PLAY3RBX coordinator-specific)
+_install.py
+_build.*
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Selene / StyLua / Luau LSP local caches
+.luau-aliases
+sourcemap.json

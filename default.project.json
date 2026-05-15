@@ -1,41 +1,42 @@
 {
-  "name": "PLAY3Analytics",
+  "name": "PLAY3_SDK",
   "tree": {
     "$className": "DataModel",
-
-    "ReplicatedStorage": {
-      "$className": "ReplicatedStorage",
-      "PLAY3_ANALYTICS": {
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "PLAY3_SDK": {
         "$className": "Folder",
+        "Main": {
+          "$path": "Main.server.lua"
+        },
         "Config": {
-          "$path": "sdk/Config.lua"
+          "$path": "Config.lua"
+        },
+        "Core": {
+          "$className": "Folder",
+          "$path": "Core"
         },
         "Analytics": {
           "$className": "Folder",
-          "HashLib": {
-            "$path": "sdk/Analytics/HashLib"
-          },
-          "PLAY3_Analytics": {
-            "$path": "sdk/Analytics/PLAY3_Analytics.lua"
-          },
-          "Profileanalyzer": {
-            "$path": "sdk/Analytics/Profileanalyzer.lua"
-          },
-          "PurchaseTracker": {
-            "$path": "sdk/Analytics/PurchaseTracker.lua"
-          }
+          "$path": "Analytics"
+        },
+        "Modules": {
+          "$className": "Folder",
+          "$path": "Modules"
         }
       }
     },
-
-    "ServerScriptService": {
-      "$className": "ServerScriptService",
-      "PLAY3_ANALYTICS_SERVER": {
-        "$className": "Folder",
-        "Main": {
-          "$path": "sdk/Main.server.lua"
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "PLAY3_SDK_Client": {
+          "$className": "Folder",
+          "$path": "Client"
         }
       }
     }
-  }
+  },
+  "serveAddress": "127.0.0.1",
+  "servePort": 34872
 }
