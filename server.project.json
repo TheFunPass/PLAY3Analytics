@@ -1,0 +1,24 @@
+{
+  "name": "PLAY3_SDK",
+  "tree": {
+    "$className": "Folder",
+    "Main": {
+      "$path": "Main.server.lua"
+    },
+    "Config": {
+      "$path": "Config.lua"
+    },
+    "Core": {
+      "$className": "Folder",
+      "$path": "Core"
+    },
+    "Analytics": {
+      "$className": "Folder",
+      "$path": "Analytics"
+    },
+    "Modules": {
+      "$className": "Folder",
+      "$path": "Modules"
+    }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "PLAY3_SDK_Client",
+  "tree": {
+    "$className": "Folder",
+    "DeviceInfoClient": {
+      "$path": "Client/DeviceInfoClient.client.lua"
+    }
+  }
+}

@@ -13,14 +13,73 @@ A drop-in analytics + deep-link attribution SDK for Roblox games. Player session
 
 Player IDs are SHA-256 hashed before leaving the game server (COPPA-friendly anonymous IDs).
 
-## Install (Rojo)
+## Install
 
-1. `git clone https://github.com/TheFunPass/PLAY3Analytics.git` into your project root (or add as a submodule).
-2. Build into your place: `rojo build path/to/PLAY3Analytics/default.project.json -o PLAY3Analytics.rbxlx` and merge, **or** use `rojo serve` and the Studio plugin to live-sync.
-3. The project mounts as:
-   - `ServerScriptService.PLAY3_SDK` — server-side logic
-   - `StarterPlayer.StarterPlayerScripts.PLAY3_SDK_Client` — device-detection LocalScript
-4. Set your API keys in `Config.lua` (see below) and save the place.
+Three ways, pick whichever fits your workflow.
+
+### Option 1 — Drag & drop (no tools required)
+
+The repo ships two pre-built model files. Download them, drag each into the right place in Studio, set your API key, done.
+
+1. Grab both files from this repo:
+   - [**`PLAY3_SDK.rbxm`**](PLAY3_SDK.rbxm) — server-side logic
+   - [**`PLAY3_SDK_Client.rbxm`**](PLAY3_SDK_Client.rbxm) — client-side device detection
+2. In Studio, **right-click `ServerScriptService` → Insert from File…** → pick `PLAY3_SDK.rbxm`.
+3. **Right-click `StarterPlayer.StarterPlayerScripts` → Insert from File…** → pick `PLAY3_SDK_Client.rbxm`.
+4. Open `ServerScriptService.PLAY3_SDK.Config` and paste your API key over the placeholder (see [Configure](#configure)).
+5. **Press F5** — analytics fires automatically.
+
+> You can also drag the `.rbxm` files straight from your file manager onto the corresponding service in Studio's Explorer panel.
+
+### Option 2 — Manual file placement
+
+If you want to inspect or modify the source before installing:
+
+1. `git clone https://github.com/TheFunPass/PLAY3Analytics.git` (or download the ZIP from the green Code button → Download ZIP).
+2. In Studio, recreate this hierarchy by hand (right-click → Insert Object → Folder / Script / ModuleScript / LocalScript, then paste source from the matching file):
+   ```
+   ServerScriptService/
+   └── PLAY3_SDK (Folder)
+       ├── Main                       (Script)        ← Main.server.lua
+       ├── Config                     (ModuleScript)  ← Config.lua
+       ├── Core (Folder)
+       │   ├── HashLib                (ModuleScript)  ← Core/HashLib/init.lua
+       │   │   └── Base64             (ModuleScript)  ← Core/HashLib/Base64.lua
+       │   ├── HttpQueue              (ModuleScript)  ← Core/HttpQueue.lua
+       │   ├── PlayerState            (ModuleScript)  ← Core/PlayerState.lua
+       │   └── DeviceTracker          (ModuleScript)  ← Core/DeviceTracker.lua
+       ├── Analytics (Folder)
+       │   ├── SessionTracker         (Script)        ← Analytics/SessionTracker.server.lua
+       │   ├── PlayerAnalyzer         (Script)        ← Analytics/PlayerAnalyzer.server.lua
+       │   └── PurchaseTracker        (Script)        ← Analytics/PurchaseTracker.server.lua
+       └── Modules (Folder)
+           └── Attribution            (ModuleScript)  ← Modules/Attribution.lua
+
+   StarterPlayer/
+   └── StarterPlayerScripts/
+       └── PLAY3_SDK_Client (Folder)
+           └── DeviceInfoClient       (LocalScript)   ← Client/DeviceInfoClient.client.lua
+   ```
+   The class of each instance matters — Scripts must be `Script` (not `ModuleScript`) so they auto-run.
+3. Set your API key in `Config` and press F5.
+
+### Option 3 — Rojo (recommended for ongoing development)
+
+1. `git clone https://github.com/TheFunPass/PLAY3Analytics.git` into your project.
+2. `rojo serve default.project.json` and connect via the Rojo Studio plugin to live-sync, **or** `rojo build default.project.json -o PLAY3Analytics.rbxlx` to produce a place file you can open directly.
+3. The project mounts both pieces automatically:
+   - `ServerScriptService.PLAY3_SDK`
+   - `StarterPlayer.StarterPlayerScripts.PLAY3_SDK_Client`
+4. Edit `Config.lua` on disk; live-sync handles the rest.
+
+### Building the model files yourself
+
+Both `.rbxm` files are committed, but if you fork and want to rebuild:
+
+```bash
+rojo build server.project.json -o PLAY3_SDK.rbxm
+rojo build client.project.json -o PLAY3_SDK_Client.rbxm
+```
 
 ## Configure
 
@@ -95,6 +154,3 @@ Attribution functions are no-ops for players who didn't arrive via a deep link, 
 - Roblox Studio with HTTP requests allowed for the experience (`Game Settings → Security → Allow HTTP Requests`).
 - API keys from PLAY3 (sessions/purchases/analysis) and optionally from `reels.play3.ai` (deep-link attribution).
 
-## License
-
-MIT — see [LICENSE](LICENSE).

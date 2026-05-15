@@ -1,8 +1,10 @@
-# Rojo build artifacts
+# Rojo build artifacts (default-deny, then allow the two release models)
 *.rbxl
 *.rbxlx
 *.rbxm
 *.rbxmx
+!/PLAY3_SDK.rbxm
+!/PLAY3_SDK_Client.rbxm
 
 # Local install/dev helpers (PLAY3RBX coordinator-specific)
 _install.py
