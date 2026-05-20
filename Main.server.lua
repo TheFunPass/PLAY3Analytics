@@ -13,16 +13,22 @@
 	- Attribution is opt-in: it requires a separate ATTRIBUTION_API_KEY.
 	  This script bootstraps it only when configured.
 
-	PUBLIC API (Attribution only):
+	PUBLIC API:
 		local SSS = game:GetService("ServerScriptService")
-		local Attribution = require(SSS.PLAY3_SDK.Modules.Attribution)
 
+		-- Attribution (deep link tracking + custom events)
+		local Attribution = require(SSS.PLAY3_SDK.Modules.Attribution)
 		Attribution:TrackBadge(player, badgeId, "Badge Name")
 		Attribution:TrackMilestone(player, "level_up", { level = 10 })
-
 		if Attribution:IsAttributed(player) then
 		    print("Source:", Attribution:GetSource(player))
 		end
+
+		-- Leaderboard (read brand's creator leaderboard, render in-game)
+		local Leaderboard = require(SSS.PLAY3_SDK.Modules.Leaderboard)
+		local board = Leaderboard:GetTop({ limit = 10 })
+		Leaderboard:StartAutoRefresh()
+		Leaderboard:OnUpdate(function(newBoard) ... end)
 ]]
 
 local RunService = game:GetService("RunService")

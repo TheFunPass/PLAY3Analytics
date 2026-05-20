@@ -21,9 +21,11 @@ return {
 	PLAY3_API_URL = "https://play3-ai-assistant-605640375727.us-central1.run.app",
 
 	-- ============ API KEYS ============
-	-- Your attribution API key (for deep link attribution tracking)
+	-- Your reels.play3.ai API key.
+	-- Used for: deep link attribution (Modules/Attribution) AND the in-game
+	-- leaderboard read API (Modules/Leaderboard) — same key, same backend.
 	-- Get from: https://reels.play3.ai/brand (Brand Dashboard > Deeplinks > API Keys)
-	-- Leave as placeholder if you're not using deep link attribution.
+	-- Leave as placeholder if you're not using attribution or leaderboards.
 	ATTRIBUTION_API_KEY = "YOUR_ATTRIBUTION_API_KEY_HERE",
 
 	-- Your PLAY3 API key (for sessions, purchases, player analysis)
@@ -39,6 +41,11 @@ return {
 
 	-- Player analysis queue delay (seconds) - space out analysis requests
 	PLAYER_ANALYSIS_DELAY = 0.5,
+
+	-- Leaderboard cache TTL (seconds). The upstream stats refresh is hourly,
+	-- so anything under ~15 min is wasted. 30 min keeps in-game UI fresh
+	-- without hammering the API.
+	LEADERBOARD_CACHE_TTL = 1800,
 
 	-- ============ FEATURE FLAGS ============
 	-- Enable/disable specific tracking features
