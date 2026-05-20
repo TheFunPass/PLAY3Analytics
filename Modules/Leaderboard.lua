@@ -381,6 +381,65 @@ function Leaderboard:StopAutoRefresh()
 	autoRefreshRunning = false
 end
 
+-- ── CLIENT REPLICATION (one-call dev integration) ──────────────────────
+--
+-- Most games want the leaderboard rendered inside a ScreenGui, which means
+-- the server has to push board updates to clients. The cross-script
+-- plumbing (RemoteEvent + broadcast-on-update + warm-paint-on-join) is the
+-- same in every game, so the SDK owns it.
+--
+-- After calling this once on the server, a client LocalScript can render
+-- the leaderboard with three lines:
+--
+--   local remote = game:GetService("ReplicatedStorage")
+--     :WaitForChild("Play3LeaderboardUpdate")
+--   remote.OnClientEvent:Connect(function(board)
+--     -- board.entries = { { rank, robloxUserId, points, videos, totalViews }, ... }
+--   end)
+--
+-- Idempotent — calling this twice is a no-op. Also auto-starts the
+-- refresh loop so the dev never has to call StartAutoRefresh separately.
+
+local REMOTE_NAME = "Play3LeaderboardUpdate"
+local replicationEnabled = false
+
+function Leaderboard:EnableClientReplication()
+	if replicationEnabled then return end
+
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+	local Players = game:GetService("Players")
+
+	-- Create or reuse the RemoteEvent. Reusing is important because some
+	-- games may have wired up listeners before we ran, and re-creating
+	-- would orphan their connections.
+	local remote = ReplicatedStorage:FindFirstChild(REMOTE_NAME)
+	if not remote then
+		remote = Instance.new("RemoteEvent")
+		remote.Name = REMOTE_NAME
+		remote.Parent = ReplicatedStorage
+	end
+
+	-- Broadcast every successful refresh to all connected players.
+	self:OnUpdate(function(board)
+		remote:FireAllClients(board)
+	end)
+
+	-- Warm-paint: players who join between refresh cycles get the current
+	-- cached board immediately, so their UI doesn't sit empty waiting for
+	-- the next 30-min tick.
+	Players.PlayerAdded:Connect(function(player)
+		if cache and #cache.entries > 0 then
+			remote:FireClient(player, cache)
+		end
+	end)
+
+	-- Auto-start the refresh loop so the dev doesn't have to remember.
+	self:StartAutoRefresh()
+
+	replicationEnabled = true
+	log("Client replication enabled — clients can subscribe via ReplicatedStorage." .. REMOTE_NAME)
+end
+
 log("Leaderboard module ready")
 
 return Leaderboard

@@ -26,9 +26,12 @@
 
 		-- Leaderboard (read brand's creator leaderboard, render in-game)
 		local Leaderboard = require(SSS.PLAY3_SDK.Modules.Leaderboard)
-		local board = Leaderboard:GetTop({ limit = 10 })
-		Leaderboard:StartAutoRefresh()
-		Leaderboard:OnUpdate(function(newBoard) ... end)
+		-- One-call setup: creates ReplicatedStorage.Play3LeaderboardUpdate,
+		-- auto-broadcasts on refresh, warm-paints new joiners, starts the
+		-- refresh loop. Client LocalScript only needs to subscribe.
+		Leaderboard:EnableClientReplication()
+		-- (Advanced) server-side direct read, no RemoteEvent:
+		-- local board = Leaderboard:GetTop({ limit = 10 })
 ]]
 
 local RunService = game:GetService("RunService")
