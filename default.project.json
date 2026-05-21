@@ -23,6 +23,10 @@
         "Modules": {
           "$className": "Folder",
           "$path": "Modules"
+        },
+        "Addons": {
+          "$className": "Folder",
+          "$path": "Addons"
         }
       }
     },

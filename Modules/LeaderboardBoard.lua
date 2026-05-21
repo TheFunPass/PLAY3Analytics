@@ -84,16 +84,29 @@ local function formatCount(n)
 end
 
 -- Server-side username cache. Roblox APIs are rate-limited so we hold onto
--- results across re-renders. Cleared by neither — process-lifetime cache.
+-- results across re-renders. Process-lifetime cache.
 local nameCache = {}
-local function resolveName(robloxUserId)
-	if nameCache[robloxUserId] then return nameCache[robloxUserId] end
-	local ok, name = pcall(function()
-		return Players:GetNameFromUserIdAsync(robloxUserId)
+
+-- Async-resolve a Roblox username into the given TextLabel without yielding
+-- the calling thread. Used inside buildRow so render() never blocks
+-- mid-build, which is what was causing duplicate rows (two concurrent
+-- renders interleaving their builds while both yielded on the name lookup).
+local function bindName(robloxUserId, label)
+	if nameCache[robloxUserId] then
+		label.Text = nameCache[robloxUserId]
+		return
+	end
+	label.Text = "..."
+	task.spawn(function()
+		local ok, name = pcall(function()
+			return Players:GetNameFromUserIdAsync(robloxUserId)
+		end)
+		local resolved = (ok and name) or "Player"
+		nameCache[robloxUserId] = resolved
+		if label and label.Parent then
+			label.Text = resolved
+		end
 	end)
-	local resolved = (ok and name) or "Player"
-	nameCache[robloxUserId] = resolved
-	return resolved
 end
 
 -- ── GUI BUILD ──────────────────────────────────────────────────────────
@@ -150,17 +163,28 @@ local function buildRoot(sg, opts, theme)
 	headerConstraint.MinTextSize = 14
 	headerConstraint.Parent = header
 
-	-- Rows container — fills the remaining vertical space
-	local rows = Instance.new("Frame")
+	-- Rows container — ScrollingFrame so the panel handles 1 to 100 rows
+	-- without changing row height. AutomaticCanvasSize.Y grows the canvas
+	-- to fit exactly the rows present, so 3 entries don't leave 7 empty
+	-- slots and 50 entries enable a scroll bar.
+	local rows = Instance.new("ScrollingFrame")
 	rows.Name = "Rows"
 	rows.LayoutOrder = 2
-	rows.Size = UDim2.new(1, 0, 0.9, 0)
+	rows.Size = UDim2.new(1, 0, 0.92, 0)
 	rows.BackgroundTransparency = 1
+	rows.BorderSizePixel = 0
+	rows.CanvasSize = UDim2.new(0, 0, 0, 0)
+	rows.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	rows.ScrollingDirection = Enum.ScrollingDirection.Y
+	rows.ScrollBarThickness = 6
+	rows.ScrollBarImageColor3 = theme.accent
+	rows.ScrollBarImageTransparency = 0.4
+	rows.Active = true
 	rows.Parent = panel
 
 	local rowsLayout = Instance.new("UIListLayout")
 	rowsLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	rowsLayout.Padding = UDim.new(0.01, 0)
+	rowsLayout.Padding = UDim.new(0, 6)
 	rowsLayout.FillDirection = Enum.FillDirection.Vertical
 	rowsLayout.HorizontalAlignment = Enum.HorizontalAlignment.Center
 	rowsLayout.Parent = rows
@@ -168,13 +192,16 @@ local function buildRoot(sg, opts, theme)
 	return panel, rows
 end
 
-local function buildRow(entry, theme, rowCount)
+local ROW_HEIGHT_PX = 56  -- fixed pixel height inside the ScrollingFrame canvas
+
+local function buildRow(entry, theme)
 	local row = Instance.new("Frame")
 	row.Name = "Row_" .. tostring(entry.rank)
 	row.LayoutOrder = entry.rank
-	-- Each row takes 1/N of the rows-container height, where N caps at 10
-	-- for the visual proportions to stay sensible at large limits.
-	row.Size = UDim2.new(1, 0, 1 / math.min(math.max(rowCount, 5), 10), 0)
+	-- Width: 1 scale minus a small inset so the scroll bar (6 px) doesn't
+	-- crowd the row. Height: fixed pixels — the ScrollingFrame's canvas
+	-- grows to fit, so we don't need to squish rows for higher row counts.
+	row.Size = UDim2.new(1, -10, 0, ROW_HEIGHT_PX)
 	row.BackgroundColor3 = theme.rowBg
 	row.BackgroundTransparency = 0.2
 	row.BorderSizePixel = 0
@@ -226,13 +253,13 @@ local function buildRow(entry, theme, rowCount)
 	nameLabel.Position = UDim2.new(0.22, 0, 0.32, 0)
 	nameLabel.Size = UDim2.new(0.55, 0, 0.4, 0)
 	nameLabel.BackgroundTransparency = 1
-	nameLabel.Text = resolveName(entry.robloxUserId)
 	nameLabel.TextColor3 = theme.textPrimary
 	nameLabel.Font = Enum.Font.GothamSemibold
 	nameLabel.TextScaled = true
 	nameLabel.TextXAlignment = Enum.TextXAlignment.Left
 	nameLabel.TextTruncate = Enum.TextTruncate.AtEnd
 	nameLabel.Parent = row
+	bindName(entry.robloxUserId, nameLabel)
 
 	-- Subtitle: videos · views
 	local sub = Instance.new("TextLabel")
@@ -299,12 +326,12 @@ local function render(sg, rowsContainer, board, theme, opts)
 		return
 	end
 
-	local limit = math.min(opts.limit or 10, 25)
+	local limit = math.min(opts.limit or 10, 100)
 	local count = math.min(#board.entries, limit)
 
 	for i = 1, count do
 		local entry = board.entries[i]
-		local row = buildRow(entry, theme, count)
+		local row = buildRow(entry, theme)
 		row.Parent = rowsContainer
 	end
 end
@@ -347,23 +374,31 @@ function LeaderboardBoard:MountToPart(part, opts)
 
 	local _, rowsContainer = buildRoot(sg, opts, theme)
 
-	-- Subscribe to live updates from the Leaderboard module. The connection
-	-- is held by the closure — if the Part is destroyed later, the SurfaceGui
-	-- goes with it and the closure becomes a no-op (renders to a dead Frame).
-	local conn = Leaderboard:OnUpdate(function(board)
+	-- Order matters here: do the initial render BEFORE subscribing to
+	-- OnUpdate, otherwise StartAutoRefresh's first-time fetch fires the
+	-- listener with the same board we're about to render explicitly → two
+	-- interleaved renders → duplicate rows (each yield on name resolution
+	-- lets the other render run mid-build). With render now using
+	-- non-yielding bindName, this isn't strictly necessary, but the
+	-- single-fire ordering is cleaner.
+
+	-- 1) Warm the cache (idempotent)
+	Leaderboard:StartAutoRefresh()
+
+	-- 2) Initial render — yields if cache is cold while waiting for first fetch
+	local initial = Leaderboard:GetTop({ limit = opts.limit or 10 })
+	render(sg, rowsContainer, initial, theme, opts)
+
+	-- 3) Subscribe for future refreshes only. Closure holds onto sg; if the
+	--    Part is destroyed later, the listener self-disconnects.
+	local conn
+	conn = Leaderboard:OnUpdate(function(board)
 		if not sg.Parent then
 			conn:Disconnect()
 			return
 		end
 		render(sg, rowsContainer, board, theme, opts)
 	end)
-
-	-- Start auto-refresh (idempotent — no-op if already running)
-	Leaderboard:StartAutoRefresh()
-
-	-- Initial render with whatever is cached right now
-	local initial = Leaderboard:GetTop({ limit = opts.limit or 10 })
-	render(sg, rowsContainer, initial, theme, opts)
 
 	mountedParts[part] = sg
 	log("Mounted leaderboard board on", part:GetFullName())
