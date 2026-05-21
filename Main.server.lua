@@ -24,14 +24,19 @@
 		    print("Source:", Attribution:GetSource(player))
 		end
 
-		-- Leaderboard (read brand's creator leaderboard, render in-game)
+		-- Leaderboard (read brand's creator leaderboard data)
 		local Leaderboard = require(SSS.PLAY3_SDK.Modules.Leaderboard)
-		-- One-call setup: creates ReplicatedStorage.Play3LeaderboardUpdate,
-		-- auto-broadcasts on refresh, warm-paints new joiners, starts the
-		-- refresh loop. Client LocalScript only needs to subscribe.
+		-- One-call setup for ScreenGui / custom client UI: creates a
+		-- ReplicatedStorage.Play3LeaderboardUpdate RemoteEvent that
+		-- client LocalScripts can subscribe to.
 		Leaderboard:EnableClientReplication()
-		-- (Advanced) server-side direct read, no RemoteEvent:
-		-- local board = Leaderboard:GetTop({ limit = 10 })
+
+		-- LeaderboardBoard (in-world 3D billboard — plug-and-play)
+		local LeaderboardBoard = require(SSS.PLAY3_SDK.Modules.LeaderboardBoard)
+		-- Attach a leaderboard SurfaceGui to any BasePart in your world:
+		LeaderboardBoard:MountToPart(workspace.MyBillboardPart)
+		-- Or auto-mount every Part tagged "Play3Leaderboard":
+		LeaderboardBoard:AutoMountTagged()
 ]]
 
 local RunService = game:GetService("RunService")
