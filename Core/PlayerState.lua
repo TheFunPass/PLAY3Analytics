@@ -5,6 +5,7 @@
 ]]
 
 local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
 
 local HashLib = require(script.Parent.HashLib)
 local Config = require(script.Parent.Parent.Config)
@@ -25,6 +26,7 @@ function PlayerState.initPlayer(player)
 
 	playerStates[player.UserId] = {
 		visitorId = visitorId,
+		sessionId = HttpService:GenerateGUID(false), -- Per-join UUID; same across all events for this session
 		joinTime = os.time(),
 		joinId = nil,           -- Set by attribution module if attributed
 		attributed = false,     -- Whether player came from p3_ token
@@ -83,6 +85,18 @@ function PlayerState.getVisitorIdByUserId(userId)
 	return state and state.visitorId or PlayerState.hashUserId(userId)
 end
 
+-- Get sessionId for a player (per-join UUID)
+function PlayerState.getSessionId(player)
+	local state = playerStates[player.UserId]
+	return state and state.sessionId
+end
+
+-- Get sessionId by userId
+function PlayerState.getSessionIdByUserId(userId)
+	local state = playerStates[userId]
+	return state and state.sessionId
+end
+
 -- Get joinId for a player (for event tracking)
 function PlayerState.getJoinId(player)
 	local state = playerStates[player.UserId]
@@ -111,6 +125,7 @@ function PlayerState.getAllSessions()
 	for userId, state in pairs(playerStates) do
 		table.insert(sessions, {
 			playerId = state.visitorId,
+			sessionId = state.sessionId,
 			playTime = os.time() - state.joinTime,
 		})
 	end

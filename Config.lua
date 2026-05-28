@@ -53,6 +53,7 @@ return {
 	ENABLE_SESSIONS = true,         -- Track player sessions
 	ENABLE_PURCHASES = true,        -- Track purchases
 	ENABLE_PLAYER_ANALYSIS = true,  -- Track player profiles
+	ENABLE_CHAT_CAPTURE = true,     -- Capture native chat messages
 
 	-- ============ DEBUG ============
 	-- Enable debug logging (set to false in production)
