@@ -9,6 +9,7 @@ A drop-in analytics + deep-link attribution SDK for Roblox games. Player session
 | **Sessions** | `POST /game-events/sessions` | Every 60 seconds — batched per-server snapshot |
 | **Player Analysis** | `POST /game-events/player-analysis` | Once per player on join — account info, avatar, social, device |
 | **Purchases** | `POST /game-events/purchases` | Every dev product or gamepass purchase |
+| **Chat** | `POST /api/deeplinks/chats` | Public chat messages, batched every 30s. Filtered text only; whispers excluded |
 | **Attribution** *(opt-in)* | `POST /api/deeplinks/ingest` + `/event` | Players who arrived via a `p3_` deep-link token |
 
 Player IDs are SHA-256 hashed before leaving the game server (COPPA-friendly anonymous IDs).
@@ -19,17 +20,17 @@ Three ways, pick whichever fits your workflow.
 
 ### Option 1 — Drag & drop (no tools required)
 
-The repo ships two pre-built model files. Download them, drag each into the right place in Studio, set your API key, done.
+The repo ships two pre-built model files. Download them, drag each into the right place in Studio's Explorer panel, set your API key, done.
 
 1. Grab both files from this repo:
    - [**`PLAY3_SDK.rbxm`**](PLAY3_SDK.rbxm) — server-side logic
    - [**`PLAY3_SDK_Client.rbxm`**](PLAY3_SDK_Client.rbxm) — client-side device detection
-2. In Studio, **right-click `ServerScriptService` → Insert from File…** → pick `PLAY3_SDK.rbxm`.
-3. **Right-click `StarterPlayer.StarterPlayerScripts` → Insert from File…** → pick `PLAY3_SDK_Client.rbxm`.
+2. **Drag** `PLAY3_SDK.rbxm` from your file manager onto `ServerScriptService` in Studio's Explorer panel.
+3. **Drag** `PLAY3_SDK_Client.rbxm` onto `StarterPlayer.StarterPlayerScripts`.
 4. Open `ServerScriptService.PLAY3_SDK.Config` and paste your API key over the placeholder (see [Configure](#configure)).
 5. **Press F5** — analytics fires automatically.
 
-> You can also drag the `.rbxm` files straight from your file manager onto the corresponding service in Studio's Explorer panel.
+> Note: Studio's `Insert from File…` context-menu option does **not** accept `.rbxm` model files — only `.rbxmx` or raw `.lua`. You have to drag the model file onto the target service directly. (If you'd rather not drag, use Option 3 below to clone the source.)
 
 ### Option 2 — Manual file placement
 
@@ -92,7 +93,7 @@ ATTRIBUTION_API_KEY = "your-attribution-api-key", -- deep link attribution (opti
 
 Leave `ATTRIBUTION_API_KEY` as `"YOUR_ATTRIBUTION_API_KEY_HERE"` if you're not using deep-link attribution — Main will detect the placeholder and skip loading the Attribution module.
 
-Feature flags (`ENABLE_SESSIONS`, `ENABLE_PURCHASES`, `ENABLE_PLAYER_ANALYSIS`, `ENABLE_ATTRIBUTION`) are also in `Config.lua`. Set `debug = false` before shipping to silence the log lines.
+Feature flags (`ENABLE_SESSIONS`, `ENABLE_PURCHASES`, `ENABLE_PLAYER_ANALYSIS`, `ENABLE_ATTRIBUTION`, `ENABLE_CHAT_CAPTURE`) are also in `Config.lua`. Set `debug = false` before shipping to silence the log lines.
 
 ## Layout
 
