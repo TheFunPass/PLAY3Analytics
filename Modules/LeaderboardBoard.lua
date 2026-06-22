@@ -16,6 +16,10 @@
 		LeaderboardBoard:AutoMountTagged()
 
 	OPTIONS (second arg to MountToPart):
+		configId     string — when set, the board renders a brand-defined
+		             custom leaderboard (via Modules/CustomLeaderboard) instead
+		             of the default creator leaderboard. Get the configId
+		             from your PLAY3 dashboard's Leaderboards page.
 		face         Enum.NormalId — which face the GUI renders on
 		             (default Front, the +Z face)
 		title        string — header text (default "TOP CREATORS")
@@ -53,6 +57,7 @@ if not RunService:IsRunning() then return {} end
 
 local Config = require(script.Parent.Parent.Config)
 local Leaderboard = require(script.Parent.Leaderboard)
+local CustomLeaderboard = require(script.Parent.CustomLeaderboard)
 
 local LeaderboardBoard = {}
 
@@ -163,14 +168,54 @@ local function buildRoot(sg, opts, theme)
 	headerConstraint.MinTextSize = 14
 	headerConstraint.Parent = header
 
+	-- Column header — labels the columns (Rank · Player · the metric) so
+	-- players reading the board know what each value is. The metric label is
+	-- filled in render() from the board's valueLabel/metricKey.
+	local colHeader = Instance.new("Frame")
+	colHeader.Name = "ColumnHeader"
+	colHeader.LayoutOrder = 2
+	colHeader.Size = UDim2.new(1, -10, 0.05, 0)
+	colHeader.BackgroundTransparency = 1
+	colHeader.Parent = panel
+
+	local chPad = Instance.new("UIPadding")
+	chPad.PaddingLeft = UDim.new(0.02, 0)
+	chPad.PaddingRight = UDim.new(0.02, 0)
+	chPad.Parent = colHeader
+
+	local function colLabel(lblName, text, xScale, wScale, align)
+		local l = Instance.new("TextLabel")
+		l.Name = lblName
+		local right = align == Enum.TextXAlignment.Right
+		l.AnchorPoint = Vector2.new(right and 1 or 0, 0.5)
+		l.Position = UDim2.new(right and 1 or xScale, 0, 0.5, 0)
+		l.Size = UDim2.new(wScale, 0, 0.85, 0)
+		l.BackgroundTransparency = 1
+		l.Text = text
+		l.TextColor3 = theme.textMuted
+		l.Font = Enum.Font.GothamMedium
+		l.TextScaled = true
+		l.TextXAlignment = align
+		l.TextTruncate = Enum.TextTruncate.AtEnd
+		l.Parent = colHeader
+		local c = Instance.new("UITextSizeConstraint")
+		c.MaxTextSize = 18
+		c.MinTextSize = 8
+		c.Parent = l
+	end
+	-- Align roughly with buildRow: rank ~left, name at 0.22, value right.
+	colLabel("ColRank", "#", 0, 0.1, Enum.TextXAlignment.Left)
+	colLabel("ColName", "PLAYER", 0.22, 0.45, Enum.TextXAlignment.Left)
+	colLabel("ColMetric", "SCORE", 1, 0.32, Enum.TextXAlignment.Right)
+
 	-- Rows container — ScrollingFrame so the panel handles 1 to 100 rows
 	-- without changing row height. AutomaticCanvasSize.Y grows the canvas
 	-- to fit exactly the rows present, so 3 entries don't leave 7 empty
 	-- slots and 50 entries enable a scroll bar.
 	local rows = Instance.new("ScrollingFrame")
 	rows.Name = "Rows"
-	rows.LayoutOrder = 2
-	rows.Size = UDim2.new(1, 0, 0.92, 0)
+	rows.LayoutOrder = 3
+	rows.Size = UDim2.new(1, 0, 0.87, 0)
 	rows.BackgroundTransparency = 1
 	rows.BorderSizePixel = 0
 	rows.CanvasSize = UDim2.new(0, 0, 0, 0)
@@ -261,37 +306,54 @@ local function buildRow(entry, theme)
 	nameLabel.Parent = row
 	bindName(entry.robloxUserId, nameLabel)
 
-	-- Subtitle: videos · views
-	local sub = Instance.new("TextLabel")
-	sub.AnchorPoint = Vector2.new(0, 0.5)
-	sub.Position = UDim2.new(0.22, 0, 0.7, 0)
-	sub.Size = UDim2.new(0.55, 0, 0.28, 0)
-	sub.BackgroundTransparency = 1
-	sub.Text = string.format(
-		"%d %s  •  %s views",
-		entry.videos,
-		entry.videos == 1 and "vid" or "vids",
-		formatCount(entry.totalViews)
-	)
-	sub.TextColor3 = theme.textMuted
-	sub.Font = Enum.Font.Gotham
-	sub.TextScaled = true
-	sub.TextXAlignment = Enum.TextXAlignment.Left
-	sub.TextTruncate = Enum.TextTruncate.AtEnd
-	sub.Parent = row
+	-- Subtitle: only the creator leaderboard has "X vids • Y views" — custom
+	-- leaderboards just have a single value, so we skip the subtitle and let
+	-- the name label occupy the full vertical space.
+	local isCustom = entry.value ~= nil and entry.points == nil
+	if not isCustom then
+		local sub = Instance.new("TextLabel")
+		sub.AnchorPoint = Vector2.new(0, 0.5)
+		sub.Position = UDim2.new(0.22, 0, 0.7, 0)
+		sub.Size = UDim2.new(0.55, 0, 0.28, 0)
+		sub.BackgroundTransparency = 1
+		sub.Text = string.format(
+			"%d %s  •  %s views",
+			entry.videos or 0,
+			(entry.videos or 0) == 1 and "vid" or "vids",
+			formatCount(entry.totalViews)
+		)
+		sub.TextColor3 = theme.textMuted
+		sub.Font = Enum.Font.Gotham
+		sub.TextScaled = true
+		sub.TextXAlignment = Enum.TextXAlignment.Left
+		sub.TextTruncate = Enum.TextTruncate.AtEnd
+		sub.Parent = row
+	else
+		-- No subtitle row — center the name vertically.
+		nameLabel.Position = UDim2.new(0.22, 0, 0.5, 0)
+		nameLabel.AnchorPoint = Vector2.new(0, 0.5)
+		nameLabel.Size = UDim2.new(0.55, 0, 0.6, 0)
+	end
 
-	-- Points (right side)
-	local pts = Instance.new("TextLabel")
-	pts.AnchorPoint = Vector2.new(1, 0.5)
-	pts.Position = UDim2.new(1, 0, 0.5, 0)
-	pts.Size = UDim2.new(0.18, 0, 0.55, 0)
-	pts.BackgroundTransparency = 1
-	pts.Text = formatCount(entry.points) .. " pts"
-	pts.TextColor3 = theme.accent
-	pts.Font = Enum.Font.GothamBold
-	pts.TextScaled = true
-	pts.TextXAlignment = Enum.TextXAlignment.Right
-	pts.Parent = row
+	-- Right-side value label: creator boards show "X pts", custom boards
+	-- show the metric value (numeric or formatted with the unit if the
+	-- caller passed one).
+	local valueLabel = Instance.new("TextLabel")
+	valueLabel.AnchorPoint = Vector2.new(1, 0.5)
+	valueLabel.Position = UDim2.new(1, 0, 0.5, 0)
+	valueLabel.Size = UDim2.new(0.18, 0, 0.55, 0)
+	valueLabel.BackgroundTransparency = 1
+	valueLabel.TextColor3 = theme.accent
+	valueLabel.Font = Enum.Font.GothamBold
+	valueLabel.TextScaled = true
+	valueLabel.TextXAlignment = Enum.TextXAlignment.Right
+	if isCustom then
+		local v = entry.value
+		valueLabel.Text = (v == nil) and "—" or formatCount(tonumber(v) or 0)
+	else
+		valueLabel.Text = formatCount(entry.points) .. " pts"
+	end
+	valueLabel.Parent = row
 
 	return row
 end
@@ -314,6 +376,19 @@ local function buildEmptyState(rowsContainer, theme)
 end
 
 local function render(sg, rowsContainer, board, theme, opts)
+	-- Update the metric column label: custom boards show their own stat name
+	-- (valueLabel, else a humanized metricKey); the creator board shows POINTS.
+	local colMetric = sg:FindFirstChild("ColMetric", true)
+	if colMetric then
+		if opts.configId then
+			local label = board and (board.valueLabel or board.metricKey) or "SCORE"
+			label = tostring(label):gsub("^_+", ""):gsub("_+", " ")
+			colMetric.Text = string.upper(label)
+		else
+			colMetric.Text = "POINTS"
+		end
+	end
+
 	-- Clear all current children of the rows container
 	for _, child in ipairs(rowsContainer:GetChildren()) do
 		if child:IsA("Frame") or child:IsA("TextLabel") then
@@ -374,31 +449,45 @@ function LeaderboardBoard:MountToPart(part, opts)
 
 	local _, rowsContainer = buildRoot(sg, opts, theme)
 
-	-- Order matters here: do the initial render BEFORE subscribing to
-	-- OnUpdate, otherwise StartAutoRefresh's first-time fetch fires the
-	-- listener with the same board we're about to render explicitly → two
-	-- interleaved renders → duplicate rows (each yield on name resolution
-	-- lets the other render run mid-build). With render now using
-	-- non-yielding bindName, this isn't strictly necessary, but the
-	-- single-fire ordering is cleaner.
+	-- Branch the data source. With opts.configId set, we route through
+	-- CustomLeaderboard (per-config caches, /api/game/custom-leaderboard/:id);
+	-- otherwise we read the brand's creator leaderboard. The render flow is
+	-- identical for both — buildRow infers shape from each entry.
+	local source = opts.configId and "custom" or "creator"
+	local limit = opts.limit or 10
 
-	-- 1) Warm the cache (idempotent)
-	Leaderboard:StartAutoRefresh()
+	-- Order matters: render BEFORE subscribing so StartAutoRefresh's
+	-- first-time fetch doesn't fire the listener with the same board we're
+	-- about to render explicitly (causing two interleaved renders).
 
-	-- 2) Initial render — yields if cache is cold while waiting for first fetch
-	local initial = Leaderboard:GetTop({ limit = opts.limit or 10 })
-	render(sg, rowsContainer, initial, theme, opts)
-
-	-- 3) Subscribe for future refreshes only. Closure holds onto sg; if the
-	--    Part is destroyed later, the listener self-disconnects.
+	local initial
 	local conn
-	conn = Leaderboard:OnUpdate(function(board)
-		if not sg.Parent then
-			conn:Disconnect()
-			return
-		end
-		render(sg, rowsContainer, board, theme, opts)
-	end)
+	if source == "custom" then
+		-- 1) Warm cache (idempotent, per configId)
+		CustomLeaderboard:StartAutoRefresh(opts.configId)
+		-- 2) Initial render — yields on cold cache
+		initial = CustomLeaderboard:Get(opts.configId, { limit = limit })
+		render(sg, rowsContainer, initial, theme, opts)
+		-- 3) Subscribe — closure self-disconnects when Part dies
+		conn = CustomLeaderboard:OnUpdate(opts.configId, function(board)
+			if not sg.Parent then
+				conn:Disconnect()
+				return
+			end
+			render(sg, rowsContainer, board, theme, opts)
+		end)
+	else
+		Leaderboard:StartAutoRefresh()
+		initial = Leaderboard:GetTop({ limit = limit })
+		render(sg, rowsContainer, initial, theme, opts)
+		conn = Leaderboard:OnUpdate(function(board)
+			if not sg.Parent then
+				conn:Disconnect()
+				return
+			end
+			render(sg, rowsContainer, board, theme, opts)
+		end)
+	end
 
 	mountedParts[part] = sg
 	log("Mounted leaderboard board on", part:GetFullName())

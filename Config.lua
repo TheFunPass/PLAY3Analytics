@@ -47,6 +47,12 @@ return {
 	-- without hammering the API.
 	LEADERBOARD_CACHE_TTL = 1800,
 
+	-- Custom leaderboard cache TTL (seconds). Custom-metric snapshots refresh
+	-- hourly on the backend, so 15 min keeps in-game boards within one BQ
+	-- streaming-buffer delay of fresh data. Independent of LEADERBOARD_CACHE_TTL
+	-- so per-board tuning doesn't affect the creator leaderboard.
+	CUSTOM_LEADERBOARD_CACHE_TTL = 600,
+
 	-- ============ FEATURE FLAGS ============
 	-- Enable/disable specific tracking features
 	ENABLE_ATTRIBUTION = true,      -- Track deep link attribution

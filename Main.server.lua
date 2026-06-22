@@ -24,6 +24,13 @@
 		    print("Source:", Attribution:GetSource(player))
 		end
 
+		-- Custom Metrics (works for ALL players, attributed or not).
+		-- Counter, gauge, or event. Keys must be snake_case [a-z0-9_]{1,64}.
+		local Metrics = require(SSS.PLAY3_SDK.Modules.Metrics)
+		Metrics:Increment(player, "coins_earned", 50, { source = "boss_drop" })
+		Metrics:Set(player, "level", 12)
+		Metrics:Record(player, "boss_defeated", { bossId = "wraith" })
+
 		-- Leaderboard (read brand's creator leaderboard data)
 		local Leaderboard = require(SSS.PLAY3_SDK.Modules.Leaderboard)
 		-- One-call setup for ScreenGui / custom client UI: creates a
@@ -62,4 +69,12 @@ if Config.ENABLE_ATTRIBUTION and not isPlaceholder(Config.ATTRIBUTION_API_KEY) t
 	end
 elseif Config.debug then
 	print("[PLAY3 SDK] Attribution disabled (no ATTRIBUTION_API_KEY configured)")
+end
+
+-- Boot Metrics so its built-in `_playtime_seconds` ticker starts firing for
+-- every brand using the SDK, even when game code never calls Metrics:Increment.
+-- Brands that have set ATTRIBUTION_API_KEY get a free Playtime leaderboard;
+-- brands that haven't get a one-time log and no ticker (see setupOnce).
+if not isPlaceholder(Config.ATTRIBUTION_API_KEY) then
+	require(script.Parent.Modules.Metrics)
 end

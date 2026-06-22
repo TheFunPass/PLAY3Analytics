@@ -48,7 +48,8 @@ local function flush()
 	buffer = {}
 
 	HttpQueue.sendToAttribution("/api/deeplinks/chats", {
-		gameId = tostring(game.GameId),
+		gameId = tostring(game.GameId),    -- Roblox universe; matches BigQuery `gameId`
+		placeId = tostring(game.PlaceId),  -- Roblox place; matches gameApiKey.placeIds validation
 		timestamp = getIsoTimestampUTC(),
 		instanceId = game.JobId,
 		sdkVersion = SDK_VERSION,

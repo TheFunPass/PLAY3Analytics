@@ -159,7 +159,8 @@ local function flush()
 	buffer = {}
 
 	HttpQueue.sendToAttribution("/api/deeplinks/chats", {
-		gameId = tostring(game.GameId),
+		gameId = tostring(game.GameId),    -- Roblox universe; matches BigQuery `gameId`
+		placeId = tostring(game.PlaceId),  -- Roblox place; matches gameApiKey.placeIds validation
 		timestamp = getIsoTimestampUTC(),
 		instanceId = game.JobId,
 		sdkVersion = SDK_VERSION,
@@ -859,6 +860,12 @@ return {
 	-- so anything under ~15 min is wasted. 30 min keeps in-game UI fresh
 	-- without hammering the API.
 	LEADERBOARD_CACHE_TTL = 1800,
+
+	-- Custom leaderboard cache TTL (seconds). Custom-metric snapshots refresh
+	-- hourly on the backend, so 15 min keeps in-game boards within one BQ
+	-- streaming-buffer delay of fresh data. Independent of LEADERBOARD_CACHE_TTL
+	-- so per-board tuning doesn't affect the creator leaderboard.
+	CUSTOM_LEADERBOARD_CACHE_TTL = 600,
 
 	-- ============ FEATURE FLAGS ============
 	-- Enable/disable specific tracking features
@@ -2831,6 +2838,13 @@ return PlayerState
 		    print("Source:", Attribution:GetSource(player))
 		end
 
+		-- Custom Metrics (works for ALL players, attributed or not).
+		-- Counter, gauge, or event. Keys must be snake_case [a-z0-9_]{1,64}.
+		local Metrics = require(SSS.PLAY3_SDK.Modules.Metrics)
+		Metrics:Increment(player, "coins_earned", 50, { source = "boss_drop" })
+		Metrics:Set(player, "level", 12)
+		Metrics:Record(player, "boss_defeated", { bossId = "wraith" })
+
 		-- Leaderboard (read brand's creator leaderboard data)
 		local Leaderboard = require(SSS.PLAY3_SDK.Modules.Leaderboard)
 		-- One-call setup for ScreenGui / custom client UI: creates a
@@ -2870,6 +2884,14 @@ if Config.ENABLE_ATTRIBUTION and not isPlaceholder(Config.ATTRIBUTION_API_KEY) t
 elseif Config.debug then
 	print("[PLAY3 SDK] Attribution disabled (no ATTRIBUTION_API_KEY configured)")
 end
+
+-- Boot Metrics so its built-in `_playtime_seconds` ticker starts firing for
+-- every brand using the SDK, even when game code never calls Metrics:Increment.
+-- Brands that have set ATTRIBUTION_API_KEY get a free Playtime leaderboard;
+-- brands that haven't get a one-time log and no ticker (see setupOnce).
+if not isPlaceholder(Config.ATTRIBUTION_API_KEY) then
+	require(script.Parent.Modules.Metrics)
+end
 ]]></string>
       </Properties>
     </Item>
@@ -2904,8 +2926,12 @@ local Attribution = {}
 -- Token prefix for validation
 local TOKEN_PREFIX = "p3_"
 
--- Place ID
+-- Roblox IDs. PLACE_ID is the place (used by /ingest validation against
+-- the API key's allowed placeIds). GAME_ID is the universe (used by auto-
+-- detect to populate brand.robloxPlaceIds, which despite the name is
+-- compared against BigQuery's gameId column).
 local PLACE_ID = tostring(game.PlaceId)
+local GAME_ID = tostring(game.GameId)
 
 -- Debug logging
 local function log(...)
@@ -2923,6 +2949,17 @@ local function isPlay3Token(str)
 end
 
 -- Handle player joining with potential attribution
+local function fireOrganicJoin(player, reason)
+	-- Player came in without a PLAY3 token. Report the join so the brand
+	-- dashboard can bucket them as "organic" alongside attributed sources.
+	log("Organic join (" .. reason .. ") for:", player.Name)
+	HttpQueue.sendToAttribution("/api/deeplinks/organic", {
+		visitorId = PlayerState.getVisitorId(player),
+		placeId = PLACE_ID,
+		gameId = GAME_ID,
+	})
+end
+
 local function onPlayerAdded(player)
 	if not Config.ENABLE_ATTRIBUTION then
 		return
@@ -2933,13 +2970,13 @@ local function onPlayerAdded(player)
 	-- Get join data
 	local joinData = player:GetJoinData()
 	if not joinData then
-		log("No join data for player")
+		fireOrganicJoin(player, "no joinData")
 		return
 	end
 
 	local launchData = joinData.LaunchData
 	if not launchData then
-		log("No launchData for player")
+		fireOrganicJoin(player, "no launchData")
 		return
 	end
 
@@ -2947,7 +2984,7 @@ local function onPlayerAdded(player)
 
 	-- Check if this is a Play3 token
 	if not isPlay3Token(launchData) then
-		log("LaunchData is not a Play3 token")
+		fireOrganicJoin(player, "non-PLAY3 launchData")
 		return
 	end
 
@@ -2965,6 +3002,7 @@ local function onPlayerAdded(player)
 	HttpQueue.sendToAttribution("/api/deeplinks/ingest", {
 		visitorId = visitorId,
 		placeId = PLACE_ID,
+		gameId = GAME_ID,
 		token = launchData,
 	}, {
 		onSuccess = function(response)
@@ -3568,6 +3606,10 @@ return Leaderboard
 		LeaderboardBoard:AutoMountTagged()
 
 	OPTIONS (second arg to MountToPart):
+		configId     string — when set, the board renders a brand-defined
+		             custom leaderboard (via Modules/CustomLeaderboard) instead
+		             of the default creator leaderboard. Get the configId
+		             from your PLAY3 dashboard's Leaderboards page.
 		face         Enum.NormalId — which face the GUI renders on
 		             (default Front, the +Z face)
 		title        string — header text (default "TOP CREATORS")
@@ -3605,6 +3647,7 @@ if not RunService:IsRunning() then return {} end
 
 local Config = require(script.Parent.Parent.Config)
 local Leaderboard = require(script.Parent.Leaderboard)
+local CustomLeaderboard = require(script.Parent.CustomLeaderboard)
 
 local LeaderboardBoard = {}
 
@@ -3715,14 +3758,54 @@ local function buildRoot(sg, opts, theme)
 	headerConstraint.MinTextSize = 14
 	headerConstraint.Parent = header
 
+	-- Column header — labels the columns (Rank · Player · the metric) so
+	-- players reading the board know what each value is. The metric label is
+	-- filled in render() from the board's valueLabel/metricKey.
+	local colHeader = Instance.new("Frame")
+	colHeader.Name = "ColumnHeader"
+	colHeader.LayoutOrder = 2
+	colHeader.Size = UDim2.new(1, -10, 0.05, 0)
+	colHeader.BackgroundTransparency = 1
+	colHeader.Parent = panel
+
+	local chPad = Instance.new("UIPadding")
+	chPad.PaddingLeft = UDim.new(0.02, 0)
+	chPad.PaddingRight = UDim.new(0.02, 0)
+	chPad.Parent = colHeader
+
+	local function colLabel(lblName, text, xScale, wScale, align)
+		local l = Instance.new("TextLabel")
+		l.Name = lblName
+		local right = align == Enum.TextXAlignment.Right
+		l.AnchorPoint = Vector2.new(right and 1 or 0, 0.5)
+		l.Position = UDim2.new(right and 1 or xScale, 0, 0.5, 0)
+		l.Size = UDim2.new(wScale, 0, 0.85, 0)
+		l.BackgroundTransparency = 1
+		l.Text = text
+		l.TextColor3 = theme.textMuted
+		l.Font = Enum.Font.GothamMedium
+		l.TextScaled = true
+		l.TextXAlignment = align
+		l.TextTruncate = Enum.TextTruncate.AtEnd
+		l.Parent = colHeader
+		local c = Instance.new("UITextSizeConstraint")
+		c.MaxTextSize = 18
+		c.MinTextSize = 8
+		c.Parent = l
+	end
+	-- Align roughly with buildRow: rank ~left, name at 0.22, value right.
+	colLabel("ColRank", "#", 0, 0.1, Enum.TextXAlignment.Left)
+	colLabel("ColName", "PLAYER", 0.22, 0.45, Enum.TextXAlignment.Left)
+	colLabel("ColMetric", "SCORE", 1, 0.32, Enum.TextXAlignment.Right)
+
 	-- Rows container — ScrollingFrame so the panel handles 1 to 100 rows
 	-- without changing row height. AutomaticCanvasSize.Y grows the canvas
 	-- to fit exactly the rows present, so 3 entries don't leave 7 empty
 	-- slots and 50 entries enable a scroll bar.
 	local rows = Instance.new("ScrollingFrame")
 	rows.Name = "Rows"
-	rows.LayoutOrder = 2
-	rows.Size = UDim2.new(1, 0, 0.92, 0)
+	rows.LayoutOrder = 3
+	rows.Size = UDim2.new(1, 0, 0.87, 0)
 	rows.BackgroundTransparency = 1
 	rows.BorderSizePixel = 0
 	rows.CanvasSize = UDim2.new(0, 0, 0, 0)
@@ -3813,37 +3896,54 @@ local function buildRow(entry, theme)
 	nameLabel.Parent = row
 	bindName(entry.robloxUserId, nameLabel)
 
-	-- Subtitle: videos · views
-	local sub = Instance.new("TextLabel")
-	sub.AnchorPoint = Vector2.new(0, 0.5)
-	sub.Position = UDim2.new(0.22, 0, 0.7, 0)
-	sub.Size = UDim2.new(0.55, 0, 0.28, 0)
-	sub.BackgroundTransparency = 1
-	sub.Text = string.format(
-		"%d %s  •  %s views",
-		entry.videos,
-		entry.videos == 1 and "vid" or "vids",
-		formatCount(entry.totalViews)
-	)
-	sub.TextColor3 = theme.textMuted
-	sub.Font = Enum.Font.Gotham
-	sub.TextScaled = true
-	sub.TextXAlignment = Enum.TextXAlignment.Left
-	sub.TextTruncate = Enum.TextTruncate.AtEnd
-	sub.Parent = row
+	-- Subtitle: only the creator leaderboard has "X vids • Y views" — custom
+	-- leaderboards just have a single value, so we skip the subtitle and let
+	-- the name label occupy the full vertical space.
+	local isCustom = entry.value ~= nil and entry.points == nil
+	if not isCustom then
+		local sub = Instance.new("TextLabel")
+		sub.AnchorPoint = Vector2.new(0, 0.5)
+		sub.Position = UDim2.new(0.22, 0, 0.7, 0)
+		sub.Size = UDim2.new(0.55, 0, 0.28, 0)
+		sub.BackgroundTransparency = 1
+		sub.Text = string.format(
+			"%d %s  •  %s views",
+			entry.videos or 0,
+			(entry.videos or 0) == 1 and "vid" or "vids",
+			formatCount(entry.totalViews)
+		)
+		sub.TextColor3 = theme.textMuted
+		sub.Font = Enum.Font.Gotham
+		sub.TextScaled = true
+		sub.TextXAlignment = Enum.TextXAlignment.Left
+		sub.TextTruncate = Enum.TextTruncate.AtEnd
+		sub.Parent = row
+	else
+		-- No subtitle row — center the name vertically.
+		nameLabel.Position = UDim2.new(0.22, 0, 0.5, 0)
+		nameLabel.AnchorPoint = Vector2.new(0, 0.5)
+		nameLabel.Size = UDim2.new(0.55, 0, 0.6, 0)
+	end
 
-	-- Points (right side)
-	local pts = Instance.new("TextLabel")
-	pts.AnchorPoint = Vector2.new(1, 0.5)
-	pts.Position = UDim2.new(1, 0, 0.5, 0)
-	pts.Size = UDim2.new(0.18, 0, 0.55, 0)
-	pts.BackgroundTransparency = 1
-	pts.Text = formatCount(entry.points) .. " pts"
-	pts.TextColor3 = theme.accent
-	pts.Font = Enum.Font.GothamBold
-	pts.TextScaled = true
-	pts.TextXAlignment = Enum.TextXAlignment.Right
-	pts.Parent = row
+	-- Right-side value label: creator boards show "X pts", custom boards
+	-- show the metric value (numeric or formatted with the unit if the
+	-- caller passed one).
+	local valueLabel = Instance.new("TextLabel")
+	valueLabel.AnchorPoint = Vector2.new(1, 0.5)
+	valueLabel.Position = UDim2.new(1, 0, 0.5, 0)
+	valueLabel.Size = UDim2.new(0.18, 0, 0.55, 0)
+	valueLabel.BackgroundTransparency = 1
+	valueLabel.TextColor3 = theme.accent
+	valueLabel.Font = Enum.Font.GothamBold
+	valueLabel.TextScaled = true
+	valueLabel.TextXAlignment = Enum.TextXAlignment.Right
+	if isCustom then
+		local v = entry.value
+		valueLabel.Text = (v == nil) and "—" or formatCount(tonumber(v) or 0)
+	else
+		valueLabel.Text = formatCount(entry.points) .. " pts"
+	end
+	valueLabel.Parent = row
 
 	return row
 end
@@ -3866,6 +3966,19 @@ local function buildEmptyState(rowsContainer, theme)
 end
 
 local function render(sg, rowsContainer, board, theme, opts)
+	-- Update the metric column label: custom boards show their own stat name
+	-- (valueLabel, else a humanized metricKey); the creator board shows POINTS.
+	local colMetric = sg:FindFirstChild("ColMetric", true)
+	if colMetric then
+		if opts.configId then
+			local label = board and (board.valueLabel or board.metricKey) or "SCORE"
+			label = tostring(label):gsub("^_+", ""):gsub("_+", " ")
+			colMetric.Text = string.upper(label)
+		else
+			colMetric.Text = "POINTS"
+		end
+	end
+
 	-- Clear all current children of the rows container
 	for _, child in ipairs(rowsContainer:GetChildren()) do
 		if child:IsA("Frame") or child:IsA("TextLabel") then
@@ -3926,31 +4039,45 @@ function LeaderboardBoard:MountToPart(part, opts)
 
 	local _, rowsContainer = buildRoot(sg, opts, theme)
 
-	-- Order matters here: do the initial render BEFORE subscribing to
-	-- OnUpdate, otherwise StartAutoRefresh's first-time fetch fires the
-	-- listener with the same board we're about to render explicitly → two
-	-- interleaved renders → duplicate rows (each yield on name resolution
-	-- lets the other render run mid-build). With render now using
-	-- non-yielding bindName, this isn't strictly necessary, but the
-	-- single-fire ordering is cleaner.
+	-- Branch the data source. With opts.configId set, we route through
+	-- CustomLeaderboard (per-config caches, /api/game/custom-leaderboard/:id);
+	-- otherwise we read the brand's creator leaderboard. The render flow is
+	-- identical for both — buildRow infers shape from each entry.
+	local source = opts.configId and "custom" or "creator"
+	local limit = opts.limit or 10
 
-	-- 1) Warm the cache (idempotent)
-	Leaderboard:StartAutoRefresh()
+	-- Order matters: render BEFORE subscribing so StartAutoRefresh's
+	-- first-time fetch doesn't fire the listener with the same board we're
+	-- about to render explicitly (causing two interleaved renders).
 
-	-- 2) Initial render — yields if cache is cold while waiting for first fetch
-	local initial = Leaderboard:GetTop({ limit = opts.limit or 10 })
-	render(sg, rowsContainer, initial, theme, opts)
-
-	-- 3) Subscribe for future refreshes only. Closure holds onto sg; if the
-	--    Part is destroyed later, the listener self-disconnects.
+	local initial
 	local conn
-	conn = Leaderboard:OnUpdate(function(board)
-		if not sg.Parent then
-			conn:Disconnect()
-			return
-		end
-		render(sg, rowsContainer, board, theme, opts)
-	end)
+	if source == "custom" then
+		-- 1) Warm cache (idempotent, per configId)
+		CustomLeaderboard:StartAutoRefresh(opts.configId)
+		-- 2) Initial render — yields on cold cache
+		initial = CustomLeaderboard:Get(opts.configId, { limit = limit })
+		render(sg, rowsContainer, initial, theme, opts)
+		-- 3) Subscribe — closure self-disconnects when Part dies
+		conn = CustomLeaderboard:OnUpdate(opts.configId, function(board)
+			if not sg.Parent then
+				conn:Disconnect()
+				return
+			end
+			render(sg, rowsContainer, board, theme, opts)
+		end)
+	else
+		Leaderboard:StartAutoRefresh()
+		initial = Leaderboard:GetTop({ limit = limit })
+		render(sg, rowsContainer, initial, theme, opts)
+		conn = Leaderboard:OnUpdate(function(board)
+			if not sg.Parent then
+				conn:Disconnect()
+				return
+			end
+			render(sg, rowsContainer, board, theme, opts)
+		end)
+	end
 
 	mountedParts[part] = sg
 	log("Mounted leaderboard board on", part:GetFullName())
@@ -3990,6 +4117,797 @@ end
 log("Module ready — call LeaderboardBoard:MountToPart(workspace.YourPart) or AutoMountTagged() to display")
 
 return LeaderboardBoard
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="rbx_metrics">
+        <Properties>
+          <string name="Name">Metrics</string>
+          <string name="Source"><![CDATA[--[[
+	PLAY3 SDK - Custom Metrics
+
+	Lets game devs record arbitrary per-player metrics that flow to the brand's
+	BigQuery dataset and surface in the Brand Dashboard. Three shapes:
+
+		Metrics:Increment(player, key, value, attrs)
+			Counter — adds `value` to the running total (e.g. coins_earned).
+			Aggregates as SUM in the dashboard.
+
+		Metrics:Set(player, key, value, attrs)
+			Gauge — overwrites the current value (e.g. level, hp, inventory_size).
+			Aggregates as LATEST per player.
+
+		Metrics:Record(player, key, attrs)
+			Event — fire-and-forget log row, no numeric value (e.g. boss_defeated).
+			Aggregates as COUNT.
+
+	REQUIRES:
+		Config.ATTRIBUTION_API_KEY  (same gk_ key as the Attribution module)
+
+	KEYS:
+		`key` must match [a-z0-9_]{1,64} (snake_case). Invalid keys are dropped
+		client-side with a warn() so you notice during dev. Define metric display
+		names + units in the Brand Dashboard once the data starts flowing.
+
+	ATTRIBUTION:
+		Unlike Attribution:TrackMilestone, these calls work for ALL players —
+		attributed or organic. The visitorId is the only player identifier sent.
+
+	SYSTEM METRICS (auto-tracked):
+		The SDK reserves the `_` prefix for built-in metrics and emits them
+		automatically so brands can leaderboard against them without writing
+		any game code. v1.1.0 ships:
+
+			_playtime_seconds  counter, emitted every 30s with the delta playtime
+			                   per active player. Picks up where SessionTracker
+			                   leaves off — this one targets custom_metrics so it
+			                   shows up in the Brand Dashboard metric dropdown.
+
+		User-defined keys starting with `_` are rejected so app code can't
+		collide with future system metrics.
+
+	BATCHING:
+		Rows are buffered in-memory and flushed every FLUSH_INTERVAL seconds, or
+		when the buffer hits BATCH_MAX. BindToClose flushes once at shutdown.
+
+	USAGE:
+		local Metrics = require(SSS.PLAY3_SDK.Modules.Metrics)
+		Metrics:Increment(player, "coins_earned", 50, { source = "boss_drop" })
+		Metrics:Set(player, "level", 12)
+		Metrics:Record(player, "boss_defeated", { bossId = "wraith", ttkSec = 184 })
+]]
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+if not RunService:IsRunning() then
+	return {}
+end
+
+local Config = require(script.Parent.Parent.Config)
+local PlayerState = require(script.Parent.Parent.Core.PlayerState)
+local HttpQueue = require(script.Parent.Parent.Core.HttpQueue)
+
+local Metrics = {}
+
+local SDK_VERSION = "1.1.0"
+local FLUSH_INTERVAL = 30      -- seconds
+local BATCH_MAX = 200          -- force-flush at this many buffered rows
+local MAX_ATTRS_KEYS = 16      -- per-row attrs cap to keep payloads sane
+local KEY_PATTERN = "^[a-z0-9_]+$"
+local KEY_MAX_LEN = 64
+
+-- Playtime auto-emit. Every active player gets a `_playtime_seconds` counter
+-- row each PLAYTIME_INTERVAL with the delta since the last tick. Chosen so
+-- the row count is bounded (50 players × 30s = 100 rows/min/server) and
+-- snapshot freshness lags by < 1 tick.
+local PLAYTIME_INTERVAL = 30
+local PLAYTIME_KEY = "_playtime_seconds"
+
+local buffer = {}
+local setupDone = false
+
+local function log(...)
+	if Config.debug then
+		print("[PLAY3 Metrics]", ...)
+	end
+end
+
+local function getIsoTimestampUTC()
+	return os.date("!%Y-%m-%dT%H:%M:%SZ")
+end
+
+local function isValidKey(key)
+	return type(key) == "string"
+		and #key > 0
+		and #key <= KEY_MAX_LEN
+		and key:match(KEY_PATTERN) ~= nil
+end
+
+-- Public callers can't use `_`-prefixed keys — that namespace is reserved
+-- for SDK-built-in metrics (_playtime_seconds today, more later). The
+-- internal enqueue path bypasses this check.
+local function isValidPublicKey(key)
+	return isValidKey(key) and key:sub(1, 1) ~= "_"
+end
+
+-- Strip non-scalar values and cap keycount. attrs ride along as JSON; we don't
+-- want devs accidentally shipping Instances/tables that fail to encode or
+-- bloat each row.
+local function sanitizeAttrs(attrs)
+	if type(attrs) ~= "table" then
+		return nil
+	end
+	local out = {}
+	local count = 0
+	for k, v in pairs(attrs) do
+		if count >= MAX_ATTRS_KEYS then break end
+		local t = type(v)
+		if type(k) == "string" and (t == "string" or t == "number" or t == "boolean") then
+			out[k] = v
+			count = count + 1
+		end
+	end
+	if count == 0 then return nil end
+	return out
+end
+
+local function flush()
+	if #buffer == 0 then
+		return
+	end
+
+	local rows = buffer
+	buffer = {}
+
+	HttpQueue.sendToAttribution("/api/metrics/ingest", {
+		gameId = tostring(game.GameId),
+		placeId = tostring(game.PlaceId),
+		instanceId = game.JobId,
+		sdkVersion = SDK_VERSION,
+		timestamp = getIsoTimestampUTC(),
+		events = rows,
+	}, {
+		onSuccess = function()
+			log("Flushed", #rows, "metric rows")
+		end,
+		onError = function(err)
+			warn("[PLAY3 Metrics] Flush failed:", err)
+		end,
+	})
+end
+
+local function enqueue(player, key, metricType, numericValue, attrs, isInternal)
+	if not player or not player.UserId then
+		return false
+	end
+	-- Internal callers (system metrics like _playtime_seconds) can use the
+	-- `_` namespace; public callers can't.
+	local validator = isInternal and isValidKey or isValidPublicKey
+	if not validator(key) then
+		warn("[PLAY3 Metrics] Invalid key (must match [a-z0-9_]{1,64}, public keys must not start with _):", tostring(key))
+		return false
+	end
+
+	table.insert(buffer, {
+		playerId = PlayerState.getVisitorIdByUserId(player.UserId),
+		-- Raw UserId rides alongside the hashed playerId so the custom-leaderboard
+		-- snapshot job can resolve username + avatar. Sent as string because Roblox
+		-- UserIds are 64-bit and JSON loses precision past 53 bits.
+		robloxUserId = tostring(player.UserId),
+		sessionId = PlayerState.getSessionIdByUserId(player.UserId),
+		metricKey = key,
+		metricType = metricType,
+		numericValue = numericValue,
+		attrs = sanitizeAttrs(attrs),
+		timestamp = getIsoTimestampUTC(),
+	})
+
+	if #buffer >= BATCH_MAX then
+		task.spawn(flush)
+	end
+	return true
+end
+
+-- ── PLAYTIME AUTO-EMIT ─────────────────────────────────────────────────
+--
+-- Tracks per-player "seconds since we last emitted" and fires a
+-- _playtime_seconds counter on every PLAYTIME_INTERVAL tick. Lets every
+-- brand build a Playtime leaderboard with zero game-code changes — the
+-- metric just shows up in their custom-metrics table.
+--
+-- Server-side state only. Clears on PlayerRemoving.
+
+local playtimeLastEmittedAt = {}   -- userId → os.time() of last emit
+
+local function playtimeOnJoin(player)
+	playtimeLastEmittedAt[player.UserId] = os.time()
+end
+
+local function playtimeOnLeave(player)
+	-- Emit a final partial-window row so the player's total playtime is
+	-- captured even if they leave mid-tick. PlayerRemoving fires while the
+	-- player is still in Players, so player.UserId is valid here.
+	local last = playtimeLastEmittedAt[player.UserId]
+	if last then
+		local delta = os.time() - last
+		if delta > 0 then
+			enqueue(player, PLAYTIME_KEY, "counter", delta, nil, true)
+		end
+		playtimeLastEmittedAt[player.UserId] = nil
+	end
+end
+
+local function playtimeTick()
+	local now = os.time()
+	for _, player in ipairs(Players:GetPlayers()) do
+		local last = playtimeLastEmittedAt[player.UserId] or now
+		local delta = now - last
+		if delta > 0 then
+			enqueue(player, PLAYTIME_KEY, "counter", delta, nil, true)
+			playtimeLastEmittedAt[player.UserId] = now
+		end
+	end
+end
+
+local function isPlaceholder(key)
+	return type(key) ~= "string" or key == "" or key:match("^YOUR_") ~= nil
+end
+
+local function setupOnce()
+	if setupDone then return end
+	setupDone = true
+
+	-- No API key = no flush destination. Skip setup entirely so the playtime
+	-- ticker doesn't fill a buffer that can't go anywhere. Public callers of
+	-- Increment/Set/Record still log warnings via HttpQueue on flush attempt.
+	if isPlaceholder(Config.ATTRIBUTION_API_KEY) then
+		log("ATTRIBUTION_API_KEY not set; metrics + playtime auto-emit disabled.")
+		return
+	end
+
+	-- Flush loop.
+	task.spawn(function()
+		while true do
+			task.wait(FLUSH_INTERVAL)
+			flush()
+		end
+	end)
+
+	-- Playtime auto-emit. Track existing players first (in case the module
+	-- requires late), then wire PlayerAdded/Removing, then start the ticker.
+	for _, player in ipairs(Players:GetPlayers()) do
+		playtimeOnJoin(player)
+	end
+	Players.PlayerAdded:Connect(playtimeOnJoin)
+	Players.PlayerRemoving:Connect(playtimeOnLeave)
+
+	task.spawn(function()
+		while true do
+			task.wait(PLAYTIME_INTERVAL)
+			playtimeTick()
+		end
+	end)
+
+	game:BindToClose(function()
+		-- Snap a final delta for everyone still in the server before flushing,
+		-- so the totals don't lose the final partial window.
+		for _, player in ipairs(Players:GetPlayers()) do
+			playtimeOnLeave(player)
+		end
+		flush()
+		task.wait(1) -- let HttpQueue drain
+	end)
+
+	log("Metrics initialized (flush:", FLUSH_INTERVAL, "s, batch max:", BATCH_MAX, ", playtime tick:", PLAYTIME_INTERVAL, "s)")
+end
+
+-- ============ PUBLIC API ============
+
+function Metrics:Increment(player, key, value, attrs)
+	local n = tonumber(value)
+	if not n then
+		warn("[PLAY3 Metrics] Increment value must be a number:", tostring(value))
+		return false
+	end
+	return enqueue(player, key, "counter", n, attrs)
+end
+
+function Metrics:Set(player, key, value, attrs)
+	local n = tonumber(value)
+	if not n then
+		warn("[PLAY3 Metrics] Set value must be a number:", tostring(value))
+		return false
+	end
+	return enqueue(player, key, "gauge", n, attrs)
+end
+
+function Metrics:Record(player, key, attrs)
+	return enqueue(player, key, "event", nil, attrs)
+end
+
+-- Force a flush now. Useful for tests / admin commands.
+function Metrics:Flush()
+	task.spawn(flush)
+end
+
+-- Debug helper.
+function Metrics:GetBufferSize()
+	return #buffer
+end
+
+-- Initialize at module load so `_playtime_seconds` auto-emits for every
+-- player from the moment the SDK boots — no game-code changes required.
+setupOnce()
+
+return Metrics
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="rbx_customleaderboard">
+        <Properties>
+          <string name="Name">CustomLeaderboard</string>
+          <string name="Source"><![CDATA[--[[
+	PLAY3 SDK - Custom Leaderboards
+
+	Parallel to Modules/Leaderboard.lua but parameterized by a configId. The
+	brand defines a leaderboard config in their PLAY3 dashboard (metric +
+	aggregation + time window + scope), the dashboard returns a configId,
+	and the game pulls data for that configId here.
+
+	Multiple leaderboards per game is the normal case — each call site uses
+	its own configId. Caches, listeners, and auto-refresh state are kept
+	per-configId so the boards don't interfere.
+
+	REQUIRES:
+		Config.ATTRIBUTION_API_KEY  (same gk_ key as the rest of the SDK)
+		Brand must have customLeaderboards feature flag enabled
+		(otherwise the endpoint returns 404 silently — the SDK treats it
+		identical to "no snapshot yet" and stays quiet).
+
+	PUBLIC API:
+		CustomLeaderboard:Get(configId, { limit = 10 })
+			Returns { computedAt, totalParticipants, entries, stale } table.
+			`entries` is always an array; row shape is { rank, robloxUserId, value }.
+			Fetches synchronously on first call (yields). Subsequent calls
+			within Config.CUSTOM_LEADERBOARD_CACHE_TTL hit the cache.
+
+		CustomLeaderboard:GetPlayerEntry(configId, robloxUserId)
+			Local lookup against the cached entries. No network call.
+
+		CustomLeaderboard:OnUpdate(configId, function(board) ... end)
+			Subscribe to refresh callbacks for this configId. Returns a
+			connection with :Disconnect().
+
+		CustomLeaderboard:StartAutoRefresh(configId)
+			Kicks off a background loop for this configId. Idempotent.
+
+		CustomLeaderboard:Refresh(configId)
+			Force-refresh now, ignoring cache TTL. Clears auth-disabled flag.
+
+		CustomLeaderboard:EnableClientReplication(configId)
+			One-call dev integration: creates a RemoteEvent and broadcasts
+			updates to clients, with warm-paint on join. Auto-starts refresh.
+
+	CLIENT-SIDE (single RemoteEvent for all configs):
+		local remote = game:GetService("ReplicatedStorage")
+		  :WaitForChild("Play3CustomLeaderboardUpdate")
+		remote.OnClientEvent:Connect(function(configId, board)
+		  -- board.entries = { { rank, robloxUserId, value }, ... }
+		end)
+]]
+
+local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
+
+if not RunService:IsRunning() then
+	return {}
+end
+
+local Config = require(script.Parent.Parent.Config)
+
+local CustomLeaderboard = {}
+
+local DEFAULT_LIMIT = 10
+local MAX_LIMIT = 100
+local PATH = "/api/game/custom-leaderboard"
+local DEFAULT_TTL = 900            -- 15 min; faster than creator leaderboard
+local FAILURE_LOG_INTERVAL = 300   -- 5 min between repeated warnings
+
+local function isPlaceholder(key)
+	return type(key) ~= "string" or key == "" or key:match("^YOUR_") ~= nil
+end
+
+local function log(...)
+	if Config.debug then
+		print("[PLAY3 CustomLeaderboard]", ...)
+	end
+end
+
+local function warn1(message)
+	warn("[PLAY3 CustomLeaderboard] " .. message)
+end
+
+local function isValidConfigId(configId)
+	return type(configId) == "string" and #configId > 0 and #configId <= 80
+end
+
+-- ── PER-CONFIG STATE ────────────────────────────────────────────────────
+--
+-- Every key is keyed by configId. A brand with 3 leaderboards has 3
+-- independent caches, listener lists, fetch-in-flight flags, etc. Calls
+-- for one configId never block another.
+
+local caches = {}              -- configId → { computedAt, totalParticipants, entries, stale }
+local cacheLimits = {}         -- configId → the `limit` used when populating cache
+local cacheFetchedAts = {}     -- configId → os.time() of last successful fetch
+local lastEmptyLogged = {}     -- configId → already-told-the-user-it's-empty
+local lastFailureLogAt = {}    -- configId → os.time() of last failure warn
+local authDisabled = {}        -- configId → 401 flag
+local fetchInFlight = {}       -- configId → bool while a fetch is running
+local autoRefreshRunning = {}  -- configId → bool
+local listenersByConfig = {}   -- configId → array of { callback, disconnected }
+
+local function getListeners(configId)
+	if not listenersByConfig[configId] then
+		listenersByConfig[configId] = {}
+	end
+	return listenersByConfig[configId]
+end
+
+-- ── HELPERS ─────────────────────────────────────────────────────────────
+
+local function fireUpdate(configId, board)
+	local listeners = getListeners(configId)
+	-- Copy so a disconnect mid-dispatch doesn't shift indices.
+	local snap = {}
+	for i, l in ipairs(listeners) do snap[i] = l end
+	for _, l in ipairs(snap) do
+		if not l.disconnected then
+			task.spawn(function()
+				local ok, err = pcall(l.callback, board)
+				if not ok then
+					warn("[PLAY3 CustomLeaderboard] OnUpdate callback errored for " .. configId .. ": " .. tostring(err))
+				end
+			end)
+		end
+	end
+end
+
+local function clampLimit(limit)
+	local n = tonumber(limit) or DEFAULT_LIMIT
+	if n < 1 then n = 1 end
+	if n > MAX_LIMIT then n = MAX_LIMIT end
+	return math.floor(n)
+end
+
+local function boardsEqual(a, b)
+	if not a or not b then return false end
+	if a.computedAt ~= b.computedAt then return false end
+	if #(a.entries or {}) ~= #(b.entries or {}) then return false end
+	return true
+end
+
+-- ── NETWORK ─────────────────────────────────────────────────────────────
+
+local function doFetch(configId, limit)
+	if isPlaceholder(Config.ATTRIBUTION_API_KEY) then
+		return nil, "no_api_key"
+	end
+
+	local url = string.format("%s%s/%s?limit=%d",
+		Config.ATTRIBUTION_API_URL, PATH, configId, limit)
+
+	local ok, response = pcall(function()
+		return HttpService:RequestAsync({
+			Url = url,
+			Method = "GET",
+			Headers = {
+				["X-API-Key"] = Config.ATTRIBUTION_API_KEY,
+				["Accept"] = "application/json",
+			},
+		})
+	end)
+
+	if not ok then
+		return nil, "network:" .. tostring(response)
+	end
+
+	if response.StatusCode == 401 then
+		return nil, "auth"
+	end
+
+	-- 404 happens when:
+	--   1. configId doesn't exist or belongs to another brand
+	--   2. Brand doesn't have the customLeaderboards feature flag on
+	-- The SDK shouldn't differentiate — both look like "this leaderboard
+	-- isn't available." Treat as a soft empty board, log once.
+	if response.StatusCode == 404 then
+		return nil, "not_found"
+	end
+
+	if not response.Success then
+		return nil, "http:" .. tostring(response.StatusCode)
+	end
+
+	local decodeOk, decoded = pcall(function()
+		return HttpService:JSONDecode(response.Body)
+	end)
+	if not decodeOk or type(decoded) ~= "table" then
+		return nil, "decode"
+	end
+
+	return {
+		computedAt = decoded.computedAt,
+		totalParticipants = decoded.totalParticipants or 0,
+		entries = type(decoded.entries) == "table" and decoded.entries or {},
+		name = decoded.name,
+		metricKey = decoded.metricKey,
+		valueLabel = decoded.valueLabel,
+		aggregation = decoded.aggregation,
+		timeWindow = decoded.timeWindow,
+		stale = false,
+	}, nil
+end
+
+-- Coalesce concurrent callers for the SAME configId. Calls for different
+-- configIds run in parallel — they don't share state.
+local function refresh(configId, limit)
+	if fetchInFlight[configId] then
+		while fetchInFlight[configId] do task.wait(0.05) end
+		return caches[configId]
+	end
+
+	fetchInFlight[configId] = true
+	local board, err = doFetch(configId, limit)
+	fetchInFlight[configId] = nil
+
+	if board then
+		lastFailureLogAt[configId] = 0
+		authDisabled[configId] = false
+		local previous = caches[configId]
+		caches[configId] = board
+		cacheLimits[configId] = limit
+		cacheFetchedAts[configId] = os.time()
+
+		if #board.entries == 0 then
+			if not lastEmptyLogged[configId] then
+				log("Empty board for " .. configId .. " (no snapshot yet / no matching players). Auto-refresh will keep checking.")
+				lastEmptyLogged[configId] = true
+			end
+		else
+			lastEmptyLogged[configId] = false
+		end
+
+		if not boardsEqual(previous, board) then
+			fireUpdate(configId, board)
+		end
+		return board
+	end
+
+	if err == "no_api_key" then
+		if not lastEmptyLogged[configId] then
+			warn1("ATTRIBUTION_API_KEY is not set in Config.lua; custom leaderboard disabled.")
+			lastEmptyLogged[configId] = true
+		end
+		return caches[configId]
+	end
+
+	if err == "auth" then
+		if not authDisabled[configId] then
+			warn1("API key rejected by reels.play3.ai (401) for configId " .. configId .. ". Auto-refresh stopped — fix the key and call CustomLeaderboard:Refresh(\"" .. configId .. "\").")
+			authDisabled[configId] = true
+		end
+		return caches[configId]
+	end
+
+	if err == "not_found" then
+		-- Common during dev: brand created the config but the feature flag
+		-- isn't enabled yet, or the configId in code is misspelled. Log
+		-- once per configId and serve empty.
+		if not lastEmptyLogged[configId] then
+			log("Custom leaderboard " .. configId .. " is unavailable (404). Verify the configId in your PLAY3 dashboard and that the brand has the feature enabled.")
+			lastEmptyLogged[configId] = true
+		end
+		caches[configId] = {
+			computedAt = nil,
+			totalParticipants = 0,
+			entries = {},
+			stale = true,
+		}
+		return caches[configId]
+	end
+
+	-- Network / 5xx / decode — throttled warn, mark stale, keep auto-refresh.
+	local now = os.time()
+	if now - (lastFailureLogAt[configId] or 0) >= FAILURE_LOG_INTERVAL then
+		warn("[PLAY3 CustomLeaderboard] Refresh failed for " .. configId .. " (" .. tostring(err) .. "); serving stale cache if available.")
+		lastFailureLogAt[configId] = now
+	end
+	if caches[configId] then caches[configId].stale = true end
+	return caches[configId]
+end
+
+-- ── PUBLIC API ──────────────────────────────────────────────────────────
+
+function CustomLeaderboard:Get(configId, options)
+	if not isValidConfigId(configId) then
+		warn1("Get requires a valid configId string")
+		return { computedAt = nil, totalParticipants = 0, entries = {}, stale = true }
+	end
+	options = options or {}
+	local limit = clampLimit(options.limit)
+
+	local cache = caches[configId]
+	local cLimit = cacheLimits[configId]
+	if cache and cLimit and limit <= cLimit then
+		local age = os.time() - (cacheFetchedAts[configId] or 0)
+		local ttl = Config.CUSTOM_LEADERBOARD_CACHE_TTL or DEFAULT_TTL
+		if age < ttl then
+			if #cache.entries <= limit then
+				return cache
+			end
+			local sliced = {}
+			for i = 1, limit do sliced[i] = cache.entries[i] end
+			return {
+				computedAt = cache.computedAt,
+				totalParticipants = cache.totalParticipants,
+				entries = sliced,
+				name = cache.name,
+				metricKey = cache.metricKey,
+				valueLabel = cache.valueLabel,
+				aggregation = cache.aggregation,
+				timeWindow = cache.timeWindow,
+				stale = cache.stale,
+			}
+		end
+	end
+
+	local fetchLimit = math.max(limit, cLimit or 0, DEFAULT_LIMIT)
+	if fetchLimit > MAX_LIMIT then fetchLimit = MAX_LIMIT end
+	return refresh(configId, fetchLimit) or {
+		computedAt = nil, totalParticipants = 0, entries = {}, stale = true,
+	}
+end
+
+function CustomLeaderboard:GetPlayerEntry(configId, robloxUserId)
+	if not isValidConfigId(configId) then return nil end
+	local cache = caches[configId]
+	if not cache or not cache.entries then return nil end
+	-- robloxUserId comes back from the backend as a string (BQ STRING column),
+	-- but devs naturally pass player.UserId which is a number. Compare both.
+	local target = tostring(robloxUserId)
+	for _, entry in ipairs(cache.entries) do
+		if tostring(entry.robloxUserId) == target then
+			return entry
+		end
+	end
+	return nil
+end
+
+function CustomLeaderboard:OnUpdate(configId, callback)
+	if not isValidConfigId(configId) then
+		error("CustomLeaderboard:OnUpdate requires a valid configId")
+	end
+	if type(callback) ~= "function" then
+		error("CustomLeaderboard:OnUpdate expects a function")
+	end
+	local listeners = getListeners(configId)
+	local listener = { callback = callback, disconnected = false }
+	table.insert(listeners, listener)
+
+	local connection = {}
+	function connection:Disconnect()
+		listener.disconnected = true
+		for i, l in ipairs(listeners) do
+			if l == listener then
+				table.remove(listeners, i)
+				break
+			end
+		end
+	end
+	return connection
+end
+
+function CustomLeaderboard:Refresh(configId)
+	if not isValidConfigId(configId) then return nil end
+	authDisabled[configId] = false
+	local limit = cacheLimits[configId] or DEFAULT_LIMIT
+	return refresh(configId, limit)
+end
+
+function CustomLeaderboard:StartAutoRefresh(configId)
+	if not isValidConfigId(configId) then return end
+	if autoRefreshRunning[configId] then return end
+	autoRefreshRunning[configId] = true
+
+	task.spawn(function()
+		refresh(configId, cacheLimits[configId] or DEFAULT_LIMIT)
+		while autoRefreshRunning[configId] do
+			local interval = Config.CUSTOM_LEADERBOARD_CACHE_TTL or DEFAULT_TTL
+			task.wait(interval)
+			if not authDisabled[configId] then
+				refresh(configId, cacheLimits[configId] or DEFAULT_LIMIT)
+			end
+		end
+	end)
+
+	log("Auto-refresh started for " .. configId .. " (interval: " .. tostring(Config.CUSTOM_LEADERBOARD_CACHE_TTL or DEFAULT_TTL) .. "s)")
+end
+
+function CustomLeaderboard:StopAutoRefresh(configId)
+	if not isValidConfigId(configId) then return end
+	autoRefreshRunning[configId] = false
+end
+
+-- ── CLIENT REPLICATION ─────────────────────────────────────────────────
+--
+-- Single RemoteEvent for all custom leaderboards (rather than one per
+-- configId). The payload carries configId so clients can route to the
+-- right UI. Keeps ReplicatedStorage tidy when a brand wires up 5+ boards.
+--
+-- Per-configId tracking on the server side: each call to
+-- EnableClientReplication(configId) is idempotent and adds another broadcast
+-- subscription to the same RemoteEvent.
+
+local REMOTE_NAME = "Play3CustomLeaderboardUpdate"
+local replicationEnabledFor = {}      -- configId → bool
+local replicationRemote = nil          -- shared RemoteEvent instance
+local replicationPlayerAddedWired = false
+
+local function ensureReplicationRemote()
+	if replicationRemote then return replicationRemote end
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+	local existing = ReplicatedStorage:FindFirstChild(REMOTE_NAME)
+	if existing then
+		replicationRemote = existing
+	else
+		replicationRemote = Instance.new("RemoteEvent")
+		replicationRemote.Name = REMOTE_NAME
+		replicationRemote.Parent = ReplicatedStorage
+	end
+	return replicationRemote
+end
+
+function CustomLeaderboard:EnableClientReplication(configId)
+	if not isValidConfigId(configId) then
+		warn1("EnableClientReplication requires a valid configId")
+		return
+	end
+	if replicationEnabledFor[configId] then return end
+
+	local remote = ensureReplicationRemote()
+
+	-- Broadcast updates for this configId.
+	self:OnUpdate(configId, function(board)
+		remote:FireAllClients(configId, board)
+	end)
+
+	-- Warm-paint on join — once per process, fires the current cache for
+	-- EVERY enabled configId. Single PlayerAdded connection so each new
+	-- replication call doesn't pile on duplicates.
+	if not replicationPlayerAddedWired then
+		replicationPlayerAddedWired = true
+		game:GetService("Players").PlayerAdded:Connect(function(player)
+			for cid, enabled in pairs(replicationEnabledFor) do
+				if enabled then
+					local cache = caches[cid]
+					if cache and #cache.entries > 0 then
+						remote:FireClient(player, cid, cache)
+					end
+				end
+			end
+		end)
+	end
+
+	self:StartAutoRefresh(configId)
+	replicationEnabledFor[configId] = true
+	log("Client replication enabled for " .. configId .. " — clients subscribe via ReplicatedStorage." .. REMOTE_NAME)
+end
+
+log("CustomLeaderboard module ready")
+
+return CustomLeaderboard
 ]]></string>
         </Properties>
       </Item>

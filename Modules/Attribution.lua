@@ -22,8 +22,12 @@ local Attribution = {}
 -- Token prefix for validation
 local TOKEN_PREFIX = "p3_"
 
--- Place ID
+-- Roblox IDs. PLACE_ID is the place (used by /ingest validation against
+-- the API key's allowed placeIds). GAME_ID is the universe (used by auto-
+-- detect to populate brand.robloxPlaceIds, which despite the name is
+-- compared against BigQuery's gameId column).
 local PLACE_ID = tostring(game.PlaceId)
+local GAME_ID = tostring(game.GameId)
 
 -- Debug logging
 local function log(...)
@@ -41,6 +45,17 @@ local function isPlay3Token(str)
 end
 
 -- Handle player joining with potential attribution
+local function fireOrganicJoin(player, reason)
+	-- Player came in without a PLAY3 token. Report the join so the brand
+	-- dashboard can bucket them as "organic" alongside attributed sources.
+	log("Organic join (" .. reason .. ") for:", player.Name)
+	HttpQueue.sendToAttribution("/api/deeplinks/organic", {
+		visitorId = PlayerState.getVisitorId(player),
+		placeId = PLACE_ID,
+		gameId = GAME_ID,
+	})
+end
+
 local function onPlayerAdded(player)
 	if not Config.ENABLE_ATTRIBUTION then
 		return
@@ -51,13 +66,13 @@ local function onPlayerAdded(player)
 	-- Get join data
 	local joinData = player:GetJoinData()
 	if not joinData then
-		log("No join data for player")
+		fireOrganicJoin(player, "no joinData")
 		return
 	end
 
 	local launchData = joinData.LaunchData
 	if not launchData then
-		log("No launchData for player")
+		fireOrganicJoin(player, "no launchData")
 		return
 	end
 
@@ -65,7 +80,7 @@ local function onPlayerAdded(player)
 
 	-- Check if this is a Play3 token
 	if not isPlay3Token(launchData) then
-		log("LaunchData is not a Play3 token")
+		fireOrganicJoin(player, "non-PLAY3 launchData")
 		return
 	end
 
@@ -83,6 +98,7 @@ local function onPlayerAdded(player)
 	HttpQueue.sendToAttribution("/api/deeplinks/ingest", {
 		visitorId = visitorId,
 		placeId = PLACE_ID,
+		gameId = GAME_ID,
 		token = launchData,
 	}, {
 		onSuccess = function(response)
